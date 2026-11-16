@@ -1,0 +1,25 @@
+# .github/workflows/quiet-pipelines.yml
+name: quiet-pipelines
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"     # every 6 hours
+  workflow_dispatch:
+
+permissions:
+  contents: read               # read the config and repo files
+  actions: read                # read failed run logs for the diagnosis
+  issues: write                # open / comment / close issues
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: OWNER/quiet-pipelines@v0.1.0          # pin a tag or a commit SHA
+        env:
+          YT_TOKEN_JSON: ${{ secrets.YT_TOKEN_JSON }}   # only the secrets your checks reference
+        with:
+          config: quiet-pipelines.yml
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional

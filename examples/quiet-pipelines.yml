@@ -1,0 +1,74 @@
+# quiet-pipelines.yml — put this at the root of the repository you want to watch.
+# Secrets are NEVER written here: only the NAMES of env vars that hold them.
+version: 1
+
+defaults:
+  max_age_hours: 36            # "abnormal" when the newest output is older than this
+
+checks:
+  # 1) A YouTube channel that should publish at least daily (OAuth token JSON in a secret).
+  - name: youtube-channel
+    type: youtube_latest_upload
+    auth: oauth                          # or: api_key  (+ api_key_env, channel_id)
+    token_json_env: YT_TOKEN_JSON        # env var holding the authorized-user token JSON
+    expect_channel_name_contains: My Channel
+    workflows: [daily_post.yml]          # used by the diagnosis to find failed runs
+
+  # 2) A blog / podcast feed that should get a new item every week.
+  - name: blog-feed
+    type: rss_freshness
+    url: https://example.com/feed.xml
+    max_age_hours: 192
+
+  # 3) An HTTP endpoint that reports its own last update time.
+  - name: status-api
+    type: http_freshness
+    url: https://api.example.com/status
+    source: json_field                   # last_modified | json_field | regex
+    field: data.updated_at
+    # headers_env: STATUS_API_HEADERS    # env var with a JSON object of headers
+
+  # 4) A file the pipeline commits on every successful run.
+  - name: registry-file
+    type: repo_file_freshness
+    path: output/registry.jsonl
+    ignore_authors: []                   # e.g. a bot that only touches timestamps
+    workflows: [daily_post.yml]
+
+ledger:
+  warn_within_days: 30
+  stale_after_days: 30
+  items:
+    - id: github_pat
+      kind: pat
+      name: GitHub Secret GH_PAT
+      workflows: [daily_post.yml]
+      expires: 2027-02-15               # copy from GitHub > Settings > Developer settings
+      last_verified: 2026-11-16
+      check: GitHub > Settings > Developer settings > Personal access tokens shows "Expires on".
+    - id: youtube_token
+      kind: oauth_token
+      name: GitHub Secret YT_TOKEN_JSON
+      expires: null
+      last_verified: 2026-11-16
+      check: The youtube-channel check reports category "auth" when the refresh token stops working.
+    - id: llm_model
+      kind: model
+      name: claude-sonnet-4-5 (used in src/generate.py)
+      expires: 2026-11-30               # provider retirement date
+      check: Provider's model deprecation page.
+
+diagnose:
+  enabled: true                          # needs ANTHROPIC_API_KEY; skipped silently otherwise
+  model: claude-opus-5-5
+  effort: medium
+  language: en                           # en | ja
+  lookback_hours: 48
+  max_log_chars: 60000
+  when: new_or_changed                   # new_or_changed | every_run
+
+issues:
+  enabled: true
+  label: quiet-pipelines
+  repeat_comment_hours: 24               # while still abnormal, at most one reminder per 24h
+  assignees: []
