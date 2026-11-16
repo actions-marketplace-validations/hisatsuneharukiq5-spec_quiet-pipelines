@@ -101,13 +101,20 @@ def excerpt(log: str, max_chars: int) -> tuple[str, bool]:
     return text, True
 
 
-def collect_logs(gh, workflows: list[str] | None, lookback_hours: int, max_chars: int) -> tuple[dict[str, Any] | None, str]:
-    runs = gh.failed_runs(workflows, lookback_hours)
-    if not runs:
+def collect_logs(gh, workflows: list[str] | None, lookback_hours: int, max_chars: int,
+                 include_attempts: bool = True) -> tuple[dict[str, Any] | None, str]:
+    """Logs of the newest failure: a run whose latest attempt failed, or (include_attempts)
+    an earlier attempt that failed before a successful re-run."""
+    candidates = [dict(r, _attempt=None) for r in gh.failed_runs(workflows, lookback_hours)]
+    if include_attempts and hasattr(gh, "failed_attempts"):
+        candidates += [dict(a, _attempt=a.get("run_attempt")) for a in gh.failed_attempts(workflows, lookback_hours)]
+    if not candidates:
         return None, ""
-    run = runs[0]
+    run = max(candidates, key=lambda r: r.get("created_at", ""))
+    attempt = run.get("_attempt")
     parts: list[str] = []
-    for job in gh.failed_jobs(run["id"]):
+    jobs = gh.failed_jobs(run["id"], attempt) if attempt else gh.failed_jobs(run["id"])
+    for job in jobs:
         failed_steps = [s.get("name") for s in job.get("steps", []) if s.get("conclusion") == "failure"]
         parts.append(f"=== job: {job.get('name')} | failed steps: {', '.join(failed_steps) or '?'} ===")
         parts.append(gh.job_log(job["id"]))
@@ -115,7 +122,8 @@ def collect_logs(gh, workflows: list[str] | None, lookback_hours: int, max_chars
     text, truncated = excerpt(raw, max_chars)
     meta = {"id": run.get("id"), "name": run.get("name"), "html_url": run.get("html_url"),
             "created_at": run.get("created_at"), "event": run.get("event"), "truncated": truncated,
-            "log_chars": len(raw)}
+            "log_chars": len(raw), "attempt": attempt,
+            "earlier_attempt_of_rerun": bool(attempt)}
     return meta, text
 
 
@@ -130,7 +138,7 @@ def build_prompt(check: dict[str, Any], run_meta: dict[str, Any] | None, log_tex
         "",
     ]
     if run_meta:
-        lines += ["## Latest failed CI run", json.dumps({k: run_meta.get(k) for k in ("name", "created_at", "event", "truncated", "log_chars")}),
+        lines += ["## Latest failed CI run", json.dumps({k: run_meta.get(k) for k in ("name", "created_at", "event", "truncated", "log_chars", "attempt", "earlier_attempt_of_rerun")}),
                   "", "## Log excerpt (secrets redacted)", "<log>", log_text, "</log>"]
     else:
         lines += ["## CI logs", "No failed run was found in the lookback window. Diagnose from the check result only;",

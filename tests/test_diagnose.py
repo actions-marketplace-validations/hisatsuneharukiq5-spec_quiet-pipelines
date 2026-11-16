@@ -63,7 +63,7 @@ def test_happy_path_and_request_shape(monkeypatch):
     prompt = sent["messages"][0]["content"]
     assert SECRET not in prompt and "[REDACTED]" in prompt and "invalid_grant" in prompt
     assert "failed steps: Upload" in prompt and "Japanese" in prompt
-    assert sent["model"] == "claude-opus-5-5"
+    assert sent["model"] == "claude-sonnet-5-5"
     assert sent["output_config"]["format"]["type"] == "json_schema" and sent["output_config"]["effort"] == "medium"
     assert sent["fallbacks"] == "default" and sent["betas"] == ["server-side-fallback-2026-07-01"]
     assert "temperature" not in sent and "thinking" not in sent

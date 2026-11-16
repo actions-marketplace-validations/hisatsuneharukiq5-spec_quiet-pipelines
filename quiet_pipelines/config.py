@@ -8,8 +8,9 @@ from typing import Any
 import yaml
 
 from .checks import REGISTRY
+from .scan import ScanConfig, compile_patterns
 
-DEFAULT_MODEL = "claude-opus-5-5"
+DEFAULT_MODEL = "claude-sonnet-5-5"
 META_KEYS = {"name", "type", "workflows", "enabled"}
 
 
@@ -45,6 +46,16 @@ class Config:
     stale_after_days: int | None = 30
     diagnose: DiagnoseConfig = field(default_factory=DiagnoseConfig)
     issues: IssuesConfig = field(default_factory=IssuesConfig)
+    log_scan: ScanConfig = field(default_factory=ScanConfig)
+
+    def check_workflows(self) -> list[str]:
+        """Union of `workflows` declared on checks (order kept)."""
+        seen: list[str] = []
+        for c in self.checks:
+            for wf in c.get("workflows") or []:
+                if wf not in seen:
+                    seen.append(wf)
+        return seen
 
 
 def _sub(cls, data: Any, where: str):
@@ -87,6 +98,11 @@ def parse(data: dict[str, Any]) -> Config:
     ledger = data.get("ledger") or {}
     if not isinstance(ledger, dict):
         raise ConfigError("ledger must be a mapping")
+    scan = _sub(ScanConfig, data.get("log_scan"), "log_scan")
+    try:
+        compile_patterns(scan)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     return Config(
         checks=checks,
         ledger_items=list(ledger.get("items") or []),
@@ -94,6 +110,7 @@ def parse(data: dict[str, Any]) -> Config:
         stale_after_days=ledger.get("stale_after_days", 30),
         diagnose=_sub(DiagnoseConfig, data.get("diagnose"), "diagnose"),
         issues=_sub(IssuesConfig, data.get("issues"), "issues"),
+        log_scan=scan,
     )
 
 

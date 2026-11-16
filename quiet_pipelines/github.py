@@ -51,23 +51,52 @@ class GitHub:
         return self._req(method, path, json=payload).json()
 
     # -- runs / logs (read) -------------------------------------------------
-    def failed_runs(self, workflows: list[str] | None = None, lookback_hours: int = 48,
-                    now: datetime | None = None) -> list[dict[str, Any]]:
-        """Most recent failed runs (newest first), optionally limited to workflow file names."""
+    def runs(self, workflows: list[str] | None = None, lookback_hours: int = 48, now: datetime | None = None,
+             status: str | None = None, per_page: int = 30) -> list[dict[str, Any]]:
+        """Runs created in the lookback window (newest first). `status` e.g. "failure", "success", "completed"."""
         now = now or datetime.now(timezone.utc)
         since = (now - timedelta(hours=lookback_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        params = {"status": "failure", "per_page": 20, "created": f">={since}"}
-        runs: list[dict[str, Any]] = []
-        targets = workflows or [None]
-        for wf in targets:
+        params: dict[str, Any] = {"per_page": per_page, "created": f">={since}"}
+        if status:
+            params["status"] = status
+        out: list[dict[str, Any]] = []
+        for wf in workflows or [None]:
             path = f"/actions/workflows/{wf}/runs" if wf else "/actions/runs"
-            runs.extend(self._req("GET", path, params=params).json().get("workflow_runs", []))
-        runs.sort(key=lambda r: r.get("created_at", ""), reverse=True)
-        return runs
+            out.extend(self._req("GET", path, params=params).json().get("workflow_runs", []))
+        out.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+        return out
 
-    def failed_jobs(self, run_id: int) -> list[dict[str, Any]]:
-        jobs = self._req("GET", f"/actions/runs/{run_id}/jobs", params={"per_page": 50}).json().get("jobs", [])
-        return [j for j in jobs if j.get("conclusion") == "failure"]
+    def failed_runs(self, workflows: list[str] | None = None, lookback_hours: int = 48,
+                    now: datetime | None = None) -> list[dict[str, Any]]:
+        """Runs whose LATEST attempt failed (newest first)."""
+        return self.runs(workflows, lookback_hours, now, status="failure", per_page=20)
+
+    def failed_attempts(self, workflows: list[str] | None = None, lookback_hours: int = 48,
+                        now: datetime | None = None) -> list[dict[str, Any]]:
+        """Earlier attempts that failed in runs that were re-run (e.g. failed, then re-run green).
+
+        The runs list only shows the latest attempt, so a failure fixed by "Re-run" is
+        invisible without this. Each item is the attempt object plus `run_attempt`.
+        """
+        found: list[dict[str, Any]] = []
+        for run in self.runs(workflows, lookback_hours, now, status="completed"):
+            latest = int(run.get("run_attempt") or 1)
+            for n in range(1, latest):
+                att = self._req("GET", f"/actions/runs/{run['id']}/attempts/{n}").json()
+                if att.get("conclusion") == "failure":
+                    att.setdefault("run_attempt", n)
+                    att["html_url"] = f"{run.get('html_url', '')}/attempts/{n}"
+                    att["created_at"] = att.get("run_started_at") or att.get("created_at") or run.get("created_at")
+                    found.append(att)
+        found.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+        return found
+
+    def jobs(self, run_id: int, attempt: int | None = None) -> list[dict[str, Any]]:
+        path = f"/actions/runs/{run_id}" + (f"/attempts/{attempt}" if attempt else "") + "/jobs"
+        return self._req("GET", path, params={"per_page": 50}).json().get("jobs", [])
+
+    def failed_jobs(self, run_id: int, attempt: int | None = None) -> list[dict[str, Any]]:
+        return [j for j in self.jobs(run_id, attempt) if j.get("conclusion") == "failure"]
 
     def job_log(self, job_id: int) -> str:
         # 302 to a signed blob URL; requests drops Authorization on cross-host redirects.

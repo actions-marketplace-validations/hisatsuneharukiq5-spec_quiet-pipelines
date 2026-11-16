@@ -60,12 +60,21 @@ ledger:
 
 diagnose:
   enabled: true                          # needs ANTHROPIC_API_KEY; skipped silently otherwise
-  model: claude-opus-5-5
+  model: claude-sonnet-5-5               # any Claude model id, e.g. claude-opus-5-5 for harder logs
   effort: medium
   language: en                           # en | ja
   lookback_hours: 48
   max_log_chars: 60000
   when: new_or_changed                   # new_or_changed | every_run
+
+log_scan:                                # warnings for failures hidden in GREEN runs (`|| true`, continue-on-error)
+  enabled: true
+  workflows: []                          # empty = the `workflows` listed on the checks above
+  lookback_hours: 24
+  max_runs: 10
+  # patterns: [...]                      # replaces the defaults (403/401, denied, invalid_grant, quotaExceeded, ...)
+  extra_patterns: []                     # added to the defaults
+  ignore: []                             # regexes for known-harmless lines
 
 issues:
   enabled: true

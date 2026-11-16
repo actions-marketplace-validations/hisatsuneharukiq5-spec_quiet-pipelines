@@ -3,6 +3,7 @@
   quiet-pipelines run      [--config F] [--dry-run] [--no-issues] [--no-diagnose] [--output report.json] [--fail-on-abnormal]
   quiet-pipelines check    [--config F]            # outcome checks only, print results
   quiet-pipelines ledger   [--config F]            # expiry ledger only
+  quiet-pipelines scan     [--config F]            # warnings: failures hidden inside successful runs
   quiet-pipelines validate [--config F]            # parse config, list checks
 
 Exit codes: 0 ok · 1 abnormal (only with --fail-on-abnormal for `run`; always for check/ledger) · 2 config error.
@@ -57,14 +58,25 @@ def cmd_run(args, cfg) -> int:
         print_ledger(rep)
 
     actions: list[dict[str, Any]] = []
-    if cfg.issues.enabled and not args.no_issues:
+    warnings: list[dict[str, Any]] | None = None
+    need_gh = (cfg.issues.enabled and not args.no_issues) or cfg.log_scan.enabled
+    gh = None
+    if need_gh:
         from .github import GitHub, GitHubError
-        from .issues import sync_all
         try:
             gh = GitHub(dry_run=args.dry_run)
         except GitHubError as exc:
-            print(f"  issues: skipped ({exc})")
-            gh = None
+            print(f"  github: skipped ({exc})")
+    if gh is not None and cfg.log_scan.enabled:
+        from .scan import scan_successful_runs
+        try:
+            warnings = [w.to_dict() for w in scan_successful_runs(gh, cfg.log_scan, cfg.check_workflows())]
+            print_warnings(warnings)
+        except Exception as exc:  # scanning is best effort
+            print(f"  log scan: failed ({type(exc).__name__}: {str(exc)[:120]})")
+    if cfg.issues.enabled and not args.no_issues:
+        from .github import GitHubError
+        from .issues import sync_all
         if gh is not None:
             diagnose_for = None
             if cfg.diagnose.enabled and not args.no_diagnose and not args.dry_run:
@@ -74,7 +86,7 @@ def cmd_run(args, cfg) -> int:
                     spec = next((c for c in cfg.checks if c["name"] == result["name"]), {})
                     return diagnose(result, cfg.diagnose, gh=gh, workflows=spec.get("workflows"))
             try:
-                actions = sync_all(gh, results, rep, cfg, now=now, diagnose_for=diagnose_for)
+                actions = sync_all(gh, results, rep, cfg, now=now, diagnose_for=diagnose_for, warnings=warnings)
             except GitHubError as exc:
                 print(f"  issues: failed ({exc})")
             for a in actions:
@@ -84,13 +96,19 @@ def cmd_run(args, cfg) -> int:
 
     abnormal = any(r["status"] != "ok" for r in results) or bool(rep and rep.needs_attention)
     report = {"checked_at": now.isoformat(timespec="seconds"), "abnormal": abnormal, "checks": results,
-              "ledger": rep.to_dict() if rep else None, "issue_actions": actions}
+              "ledger": rep.to_dict() if rep else None, "warnings": warnings or [], "issue_actions": actions}
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output).write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         print(f"  report: {args.output}")
-    print(f"  overall: {'ABNORMAL' if abnormal else 'OK'}")
+    print(f"  overall: {'ABNORMAL' if abnormal else 'OK'}" + (f" ({len(warnings)} warning(s))" if warnings else ""))
     return 1 if (abnormal and args.fail_on_abnormal) else 0
+
+
+def print_warnings(warnings: list[dict[str, Any]]) -> None:
+    print(f"  hidden failures in successful runs: {len(warnings)}")
+    for w in warnings[:20]:
+        print(f"    ? {w['run_name']} {w.get('created_at') or ''} | {w['job']} / {w['step']}: {w['line'][:140]}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -102,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="quiet-pipelines", description="Catch pipelines that run but stop producing.")
     ap.add_argument("--version", action="version", version=__version__)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("run", "check", "ledger", "validate"):
+    for name in ("run", "check", "ledger", "scan", "validate"):
         p = sub.add_parser(name)
         p.add_argument("--config", default=DEFAULT_CONFIG)
         if name == "run":
@@ -131,6 +149,17 @@ def main(argv: list[str] | None = None) -> int:
         results = run_checks(cfg)
         print_checks(results)
         return 1 if any(r["status"] != "ok" for r in results) else 0
+    if args.cmd == "scan":
+        from .github import GitHub, GitHubError
+        from .scan import scan_successful_runs
+        try:
+            gh = GitHub(dry_run=True)
+        except GitHubError as exc:
+            print(f"scan needs GitHub access: {exc}", file=sys.stderr)
+            return 2
+        warnings = [w.to_dict() for w in scan_successful_runs(gh, cfg.log_scan, cfg.check_workflows())]
+        print_warnings(warnings)
+        return 1 if warnings else 0
     if args.cmd == "ledger":
         rep = evaluate(cfg.ledger_items, date.today(), cfg.warn_within_days, cfg.stale_after_days)
         print_ledger(rep)

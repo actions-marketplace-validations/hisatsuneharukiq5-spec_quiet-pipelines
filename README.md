@@ -92,18 +92,36 @@ List what can expire — tokens per account, PATs, API keys, model names, free t
 or with `status: expired | broken`, open a single "expiry ledger" Issue. Items with
 `expires: null` are listed by `quiet-pipelines ledger` together with their `check:` hint.
 
+## Hidden failures in green runs
+
+A step like `git push || true` or `continue-on-error: true` can fail every day while the run
+stays green. `log_scan` reads the logs of **successful** runs of the watched workflows and
+reports lines matching error signatures (`403`/`401`, `denied`, `invalid_grant`,
+`quotaExceeded`, `rateLimitExceeded`, `Resource not accessible`, `failed to push`, Python
+tracebacks) as **warnings** — one "hidden failures" Issue, closed when they stop. Matched
+lines are redacted. Tune with `patterns` / `extra_patterns` / `ignore`; run `quiet-pipelines scan`
+to preview. Warnings do not make the run "abnormal" and never fail the job.
+
 ## Diagnosis (optional, Claude)
 
 When a check turns abnormal (or changes category), quiet-pipelines:
 
-1. finds the newest failed run of the check's `workflows` in the last `lookback_hours`,
+1. finds the newest failure of the check's `workflows` in the last `lookback_hours` — including
+   **earlier attempts of re-run runs** (a run that failed and was fixed by "Re-run" shows only its
+   green attempt in the runs list),
 2. downloads the failed jobs' logs (kept: error-like lines + the last part, up to `max_log_chars`),
 3. **masks secrets**: values of env vars named like `*_TOKEN`, `*_KEY`, `*_SECRET`, … (including fields of JSON secrets), known token formats (GitHub, Anthropic, OpenAI, Google, AWS, Slack, Hugging Face, JWT, private keys), credentials in URLs, `Authorization` headers, `password=`-style assignments and long mixed-case blobs,
-4. asks Claude (`claude-opus-5-5` by default, structured JSON output) for one of
+4. asks Claude (`claude-sonnet-5-5` by default; set `diagnose.model`, e.g. `claude-opus-5-5`) with
+   structured JSON output for one of
    **expired_or_auth · external_change · quota · code_bug · unknown**, a confidence, quoted evidence and numbered steps for a human.
 
 If the model's confidence is low, the category is forced to **unknown** in code. The model's
-answer is masked again before it is posted. Set `diagnose.language: ja` for Japanese.
+answer is masked again before it is posted. In the Issue the diagnosis is labelled as an AI
+suggestion and the steps as "suggested — verify before acting". Set `diagnose.language: ja` for Japanese.
+
+Cost: about 1.7 log characters per token, so a full 60,000-character excerpt is ~36k input
+tokens — roughly $0.08 per diagnosis on Sonnet 5.5 and $0.15 on Opus 5.5 (Nov 2026 prices).
+Lower `max_log_chars` to spend less. A diagnosis runs only when an Issue opens or its category changes.
 
 Log text is sent to the Anthropic API. If that is not acceptable, set `diagnose.enabled: false`.
 
@@ -114,6 +132,7 @@ pip install .
 quiet-pipelines validate            # config sanity
 quiet-pipelines check               # outcome checks only (needs the env vars they reference)
 quiet-pipelines ledger              # expiry ledger only
+GITHUB_REPOSITORY=owner/repo GITHUB_TOKEN=... quiet-pipelines scan   # hidden failures in green runs
 GITHUB_REPOSITORY=owner/repo GITHUB_TOKEN=... quiet-pipelines run --dry-run
 ```
 
@@ -123,7 +142,12 @@ GITHUB_REPOSITORY=owner/repo GITHUB_TOKEN=... quiet-pipelines run --dry-run
 
 ```bash
 pip install -e ".[dev]" && pytest      # unit tests; no network, no API calls
+ANTHROPIC_API_KEY=... python evals/unknown_cases.py --models claude-sonnet-5-5   # live eval, ~$0.03
 ```
+
+`evals/unknown_cases.py` feeds synthetic logs with no evidence (cut off mid-line, or no error
+lines at all) plus one clear control case, and checks that the diagnosis answers **unknown**
+for the former and the right category for the latter.
 
 ## Limits
 

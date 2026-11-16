@@ -60,7 +60,7 @@ def test_example_config_is_valid():
     cfg = load(EXAMPLE)
     assert [c["type"] for c in cfg.checks] == ["youtube_latest_upload", "rss_freshness", "http_freshness", "repo_file_freshness"]
     assert cfg.checks[0]["max_age_hours"] == 36 and cfg.checks[1]["max_age_hours"] == 192   # defaults merged, override kept
-    assert cfg.diagnose.model == "claude-opus-5-5" and cfg.issues.label == "quiet-pipelines"
+    assert cfg.diagnose.model == "claude-sonnet-5-5" and cfg.issues.label == "quiet-pipelines"
     assert evaluate(cfg.ledger_items, TODAY).invalid == []
 
 

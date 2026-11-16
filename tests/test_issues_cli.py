@@ -40,6 +40,13 @@ class MemGH:
 CFG = parse({"checks": [{"name": "yt", "type": "rss_freshness", "url": "u"}], "issues": {"repeat_comment_hours": 24}})
 
 
+@pytest.fixture(autouse=True)
+def _no_github_env(monkeypatch):
+    # CLI tests must never reach GitHub, even when run inside Actions.
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+
 def res(status="abnormal", category="no_output", msg="newest output is 50h old"):
     return {"name": "yt", "type": "rss_freshness", "status": status, "category": None if status == "ok" else category,
             "message": msg, "latest_at": "2026-11-14T10:00:00Z", "age_hours": 50, "max_age_hours": 36}
