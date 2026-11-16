@@ -110,6 +110,31 @@ def test_non_fallback_model_has_no_fallbacks():
     assert "fallbacks" not in client.kwargs and "betas" not in client.kwargs
 
 
+def test_api_error_text_is_redacted(monkeypatch):
+    # diag.error goes into a (possibly public) Issue: pattern-shaped secrets are masked...
+    d = diagnose(CHECK, DiagnoseConfig(), gh=FakeGH("x"),
+                 client=FakeClient(raises=RuntimeError(f"401 bad header Authorization: Bearer {SECRET}")))
+    assert "Claude API call failed" in d.error and SECRET not in d.error and "[REDACTED]" in d.error
+
+
+def test_api_error_redacts_known_env_value_before_truncation(monkeypatch):
+    # ...and so is the exact value of a secret-named env var, even with no known shape
+    # and even when it sits right at the truncation point (160 chars).
+    fake_key = "plain-looking-value-0042"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", fake_key)
+    msg = "x" * 150 + fake_key
+    d = diagnose(CHECK, DiagnoseConfig(), gh=FakeGH("x"), client=FakeClient(raises=RuntimeError(msg)))
+    assert fake_key not in d.error and fake_key[:10] not in d.error and "[REDACTED]" in d.error
+
+
+def test_log_read_error_text_is_redacted():
+    class LeakyGH(FakeGH):
+        def failed_runs(self, *a):
+            raise RuntimeError(f"GET https://user:{SECRET}@api.github.com/x failed")
+    d = diagnose(CHECK, DiagnoseConfig(), gh=LeakyGH(""), client=FakeClient(GOOD))
+    assert "could not read CI logs" in d.error and SECRET not in d.error
+
+
 def test_log_read_failure_still_diagnoses():
     class BrokenGH(FakeGH):
         def failed_runs(self, *a):
