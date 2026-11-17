@@ -55,6 +55,8 @@ Rules:
 - Base the category ONLY on evidence quoted from the log or check result. Put 1-4 short
   verbatim quotes in `evidence`.
 - If you are not confident, choose "unknown" and set confidence "low". Do not guess.
+- If the shape of upstream data changed (for example, an API now returns different fields or
+  types), classify it as external_change, even when the exception is raised in the pipeline's own code.
 - `human_steps`: numbered-ready, concrete actions a human should take, in order, each one
   sentence. For "unknown", give investigation steps (what to look at next), not fixes.
 - Never invent values of secrets, IDs or URLs that are not in the input.

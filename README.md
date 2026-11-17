@@ -1,31 +1,144 @@
 # quiet-pipelines
 
-**Catch pipelines that keep running but stop producing — and the keys that are about to expire.**
+**A watchdog that notices, from the outside, when an unattended automation has quietly stopped.**
 
-A scheduled job can be "green" for months while publishing nothing: an OAuth token was
-revoked, a quota ran out, a free API changed, a self-healing step silently gave up.
-quiet-pipelines checks the **outcome** (when did something new actually appear?), keeps a
-**ledger** of everything that can expire, and when something is wrong it opens a GitHub
-Issue — with an optional Claude diagnosis of the latest failed run's logs.
+## Why this exists
 
-- One Issue per problem. Still broken → a comment (at most one reminder per day). Fixed → closed automatically.
-- Uses the built-in `GITHUB_TOKEN`, so it keeps working even when the PAT you are watching expires.
-- Secrets are masked before any log leaves the runner. Low-confidence diagnoses are reported as **unknown**, never as a guess.
+My YouTube automation ran on GitHub Actions for about six months with every run green and
+zero videos published. An OAuth token had expired, the job caught the error and exited
+cleanly, and nothing looked wrong until I checked the channel by hand.
+quiet-pipelines checks whether the output actually appeared, not whether the job said it succeeded.
 
-## Install in 5 minutes
+## What it watches
 
-**1. Add `quiet-pipelines.yml`** to the root of the repository you want to watch
-(full example: [`examples/quiet-pipelines.yml`](examples/quiet-pipelines.yml)):
+- **Outcome checks.** Did something new actually appear? Each check finds the newest output
+  and compares its age with `max_age_hours`.
+
+  | type | looks at |
+  |---|---|
+  | `youtube_latest_upload` | newest **public** video on a channel (OAuth token or API key) |
+  | `rss_freshness` | newest item in an RSS/Atom feed |
+  | `http_freshness` | an endpoint's own "updated" time (`Last-Modified`, a JSON field, or a regex) |
+  | `repo_file_freshness` | last commit that touched a file (e.g. a registry your pipeline commits) |
+
+- **Log inspection.**
+  - When a check turns abnormal, it reads the newest failed run of the workflows you list.
+    That includes failed earlier attempts of runs that were later re-run green.
+  - It can also ask Claude for a diagnosis: one of `expired_or_auth`, `external_change`,
+    `quota`, `code_bug` or `unknown`, with quoted evidence and steps for a human.
+  - Low-confidence answers are forced to `unknown` in code, so a guess is never presented as a cause.
+  - Separately, it scans the logs of **successful** runs for failures that were swallowed
+    (`git push || true`, `continue-on-error`): 401/403, `invalid_grant`, `quotaExceeded`,
+    tracebacks and the like.
+- **Expiry ledger.**
+  - You list everything that can expire: tokens, PATs, API keys, model names and free tiers.
+    You record names and locations only, never values.
+  - Items expiring within `warn_within_days`, or marked `expired` / `broken`, open one ledger Issue.
+- **Issues without noise.**
+  - Each problem gets one Issue, found again later by a hidden key.
+  - While a problem lasts, the Issue gets at most one reminder comment per `repeat_comment_hours`.
+  - When the check is healthy again, the Issue is **closed automatically**.
+
+## What it cannot see
+
+- **The content of the output.** It knows *that* a new video, post or file appeared, not
+  whether it is right. A video that was published without its custom thumbnail looks
+  healthy to quiet-pipelines. I had exactly that case, without anyone noticing.
+- **The whole of a huge log.** The diagnosis sends an excerpt of at most `max_log_chars`
+  (60,000 by default): the error-like lines from the beginning plus the end of the log. If the
+  real error sits in the middle of a 30 MB test log, the diagnosis will not see it, and it
+  will answer `unknown`.
+- Also out of reach:
+  - A cause that lives in a *different* run, e.g. a job that timed out waiting for another CI run.
+  - GitHub Actions itself not running, because the watchdog runs there too. Pair it with
+    something outside, e.g. a local cron of `quiet-pipelines check`.
+
+## How accurate the diagnosis is
+
+These are measured numbers, not claims.
+
+| set | result |
+|---|---|
+| 3 real failures from my own pipelines | 3 of 3 classified correctly |
+| 7 real failures from other people's public repositories | 3 correct, 1 partly correct, **0 wrong**, 3 answered `unknown` |
+
+The first set, one line each:
+
+- YouTube upload job, OAuth refresh token revoked (`invalid_grant`): `expired_or_auth`. Fixed by re-authorizing.
+- Video job crashing at start because a config file was never committed: `code_bug`. Fixed by committing it.
+- Analysis job whose `git push` and `gh secret set` got 403 from a PAT without enough permissions: `expired_or_auth`. Fixed by recreating the PAT.
+
+These are the cases I looked at while building the prompt, so treat them as in-sample. The second set is the fairer measure.
+
+About the second set:
+
+- **How the correct answers were set:** for each case, from the commit that fixed it, written
+  down before the diagnosis ran.
+- **The "partly correct" case:** the steps matched the fix, but the category did not. The
+  upstream API changed a field type, and the model called it `code_bug`. The prompt now says
+  that a change in upstream data is `external_change`. Re-running that one case once with the
+  new prompt gave `external_change` (medium confidence), with the same fix steps. That is one
+  run of the case the rule was written for, so the table above keeps the original result.
+- **Why the three `unknown`s:** each time the deciding evidence was not in the log excerpt.
+  There was a log too large to fit, a cause in another run, and a tool that printed no details.
+- **This set is biased toward easy cases.** Cases were only usable if a fixing commit made the
+  correct answer clear, so clear-cut failures were favoured. For the same reason it contains
+  **no expired-credential and no quota cases**: those are fixed by rotating a secret or
+  waiting, which leaves no commit to compare against. Expect more `unknown` answers in
+  real use than this table suggests.
+
+## What you need
+
+- **`GITHUB_TOKEN`:** the built-in token is enough, with these permissions:
+  - `contents: read`
+  - `actions: read` (to read run logs)
+  - `issues: write` (to open, comment on and close Issues)
+
+  No personal access token is needed, so the watchdog keeps working when the PAT you are
+  watching expires.
+- **`ANTHROPIC_API_KEY`:** only if you want the diagnosis. Without it, everything else works
+  and Issues simply have no "likely cause" section.
+- The secrets your checks reference (e.g. a YouTube OAuth token JSON). They are passed **by
+  env var name only**.
+
+## What happens to your logs
+
+To diagnose a failure, quiet-pipelines sends **part of the failed job's log** to the
+Anthropic API: the excerpt described above, together with the check result. Secrets are
+masked twice before anything is sent:
+
+1. **GitHub itself** replaces the values of registered secrets with `***` in run logs.
+2. **quiet-pipelines** then masks again:
+   - the exact values of every environment variable whose name looks secret (`*_TOKEN`,
+     `*_KEY`, `*_SECRET`, …), including the string fields of JSON-valued secrets;
+   - known token formats (GitHub, Anthropic, OpenAI, Google, AWS, Slack, Hugging Face, JWTs,
+     private keys);
+   - credentials in URLs, `Authorization` headers and `password=`-style assignments;
+   - long mixed-case blobs.
+
+The model's answer, and any error text, is masked again before it is written into an Issue.
+Redaction is best effort, not a guarantee. If sending log text to an API is not acceptable
+for you, set `diagnose.enabled: false`.
+
+Cost is about $0.08 per diagnosis on `claude-sonnet-5-5` with a full 60,000-character
+excerpt. A diagnosis runs only when an Issue opens or its category changes.
+
+## Example setup
+
+`quiet-pipelines.yml` in the repository you want to watch (full version:
+[`examples/quiet-pipelines.yml`](examples/quiet-pipelines.yml)):
 
 ```yaml
 version: 1
 defaults:
-  max_age_hours: 36
+  max_age_hours: 36                    # abnormal when the newest output is older than this
 checks:
-  - name: registry-file              # a file your pipeline commits on success
-    type: repo_file_freshness
-    path: output/registry.jsonl
-    workflows: [daily_post.yml]      # where to look for failed runs
+  - name: youtube-channel
+    type: youtube_latest_upload
+    auth: oauth
+    token_json_env: YT_TOKEN_JSON      # env var holding the authorized-user token JSON
+    expect_channel_name_contains: My Channel
+    workflows: [daily_post.yml]        # where to look for failed runs
 ledger:
   items:
     - id: github_pat
@@ -33,9 +146,11 @@ ledger:
       name: GitHub Secret GH_PAT
       expires: 2027-02-15
       check: GitHub > Settings > Developer settings > Personal access tokens
+diagnose:
+  model: claude-sonnet-5-5
 ```
 
-**2. Add `.github/workflows/quiet-pipelines.yml`** ([`examples/workflow.yml`](examples/workflow.yml)):
+`.github/workflows/quiet-pipelines.yml` ([`examples/workflow.yml`](examples/workflow.yml)):
 
 ```yaml
 name: quiet-pipelines
@@ -49,108 +164,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: OWNER/quiet-pipelines@v0.1.0
+        env:
+          YT_TOKEN_JSON: ${{ secrets.YT_TOKEN_JSON }}
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional
 ```
 
-**3. (Optional) add the `ANTHROPIC_API_KEY` secret** for diagnoses. Without it everything
-else works; Issues just have no "likely cause" section.
+Start with a manual run with `dry-run: "true"`: it prints what it would do, opens no Issues
+and calls no API.
 
-Run it once from the Actions tab (`workflow_dispatch`) with `dry-run: "true"` to see what it would do.
-
-## Checks
-
-Every check finds the timestamp of the newest output and compares it with `max_age_hours`.
-
-| type | answers | key params |
-|---|---|---|
-| `youtube_latest_upload` | newest **public** video on a channel | `auth: oauth` + `token_json_env` (authorized-user token JSON in a secret) **or** `auth: api_key` + `api_key_env` + `channel_id`; `expect_channel_name_contains` |
-| `rss_freshness` | newest item in an RSS/Atom feed | `url`, `headers_env` |
-| `http_freshness` | an endpoint's own "updated" time | `url`, `source: last_modified \| json_field \| regex`, `field`, `pattern`, `headers_env` |
-| `repo_file_freshness` | last commit touching a file | `path`, `repo`, `branch`, `ignore_authors` |
-
-Results are `ok` or `abnormal` with a category: `no_output`, `auth`, `quota`, `unreachable`, `config`, `api_error`.
-Secrets are referenced **by env var name only**; pass them to the action step with `env:`.
-
-Add your own check:
-
-```python
-from quiet_pipelines.checks import BaseCheck, register
-
-@register
-class QueueDrained(BaseCheck):
-    type_name = "queue_drained"
-    required = ("queue_url",)
-    def latest_output(self):          # -> (datetime_of_newest_output, details_dict)
-        ...
-```
-
-## Expiry ledger
-
-List what can expire — tokens per account, PATs, API keys, model names, free tiers — with
-**names and locations only**. Items with `expires` within `warn_within_days` (default 30),
-or with `status: expired | broken`, open a single "expiry ledger" Issue. Items with
-`expires: null` are listed by `quiet-pipelines ledger` together with their `check:` hint.
-
-## Hidden failures in green runs
-
-A step like `git push || true` or `continue-on-error: true` can fail every day while the run
-stays green. `log_scan` reads the logs of **successful** runs of the watched workflows and
-reports lines matching error signatures (`403`/`401`, `denied`, `invalid_grant`,
-`quotaExceeded`, `rateLimitExceeded`, `Resource not accessible`, `failed to push`, Python
-tracebacks) as **warnings** — one "hidden failures" Issue, closed when they stop. Matched
-lines are redacted. Tune with `patterns` / `extra_patterns` / `ignore`; run `quiet-pipelines scan`
-to preview. Warnings do not make the run "abnormal" and never fail the job.
-
-## Diagnosis (optional, Claude)
-
-When a check turns abnormal (or changes category), quiet-pipelines:
-
-1. finds the newest failure of the check's `workflows` in the last `lookback_hours` — including
-   **earlier attempts of re-run runs** (a run that failed and was fixed by "Re-run" shows only its
-   green attempt in the runs list),
-2. downloads the failed jobs' logs (kept: error-like lines + the last part, up to `max_log_chars`),
-3. **masks secrets**: values of env vars named like `*_TOKEN`, `*_KEY`, `*_SECRET`, … (including fields of JSON secrets), known token formats (GitHub, Anthropic, OpenAI, Google, AWS, Slack, Hugging Face, JWT, private keys), credentials in URLs, `Authorization` headers, `password=`-style assignments and long mixed-case blobs,
-4. asks Claude (`claude-sonnet-5-5` by default; set `diagnose.model`, e.g. `claude-opus-5-5`) with
-   structured JSON output for one of
-   **expired_or_auth · external_change · quota · code_bug · unknown**, a confidence, quoted evidence and numbered steps for a human.
-
-If the model's confidence is low, the category is forced to **unknown** in code. The model's
-answer is masked again before it is posted. In the Issue the diagnosis is labelled as an AI
-suggestion and the steps as "suggested — verify before acting". Set `diagnose.language: ja` for Japanese.
-
-Cost: about 1.7 log characters per token, so a full 60,000-character excerpt is ~36k input
-tokens — roughly $0.08 per diagnosis on Sonnet 5.5 and $0.15 on Opus 5.5 (Nov 2026 prices).
-Lower `max_log_chars` to spend less. A diagnosis runs only when an Issue opens or its category changes.
-
-Log text is sent to the Anthropic API. If that is not acceptable, set `diagnose.enabled: false`.
-
-## Run locally
+Locally:
 
 ```bash
 pip install .
-quiet-pipelines validate            # config sanity
-quiet-pipelines check               # outcome checks only (needs the env vars they reference)
-quiet-pipelines ledger              # expiry ledger only
-GITHUB_REPOSITORY=owner/repo GITHUB_TOKEN=... quiet-pipelines scan   # hidden failures in green runs
+quiet-pipelines validate      # check the config
+quiet-pipelines check         # outcome checks only
+quiet-pipelines ledger        # expiry ledger only
 GITHUB_REPOSITORY=owner/repo GITHUB_TOKEN=... quiet-pipelines run --dry-run
 ```
 
-`run` exit codes: `0` (also when abnormal — the Issue is the signal), `1` with `--fail-on-abnormal`, `2` config error.
+## License
 
-## Development
+MIT. See [LICENSE](LICENSE).
+
+## Reproducing the evals
 
 ```bash
-pip install -e ".[dev]" && pytest      # unit tests; no network, no API calls
-ANTHROPIC_API_KEY=... python evals/unknown_cases.py --models claude-sonnet-5-5   # live eval, ~$0.03
+pip install -e ".[dev]" && pytest          # unit tests: no network, no API calls
+ANTHROPIC_API_KEY=... python evals/unknown_cases.py --models claude-sonnet-5-5 --budget 0.30
 ```
 
-`evals/unknown_cases.py` feeds synthetic logs with no evidence (cut off mid-line, or no error
-lines at all) plus one clear control case, and checks that the diagnosis answers **unknown**
-for the former and the right category for the latter.
-
-## Limits
-
-- It can't notice that GitHub Actions itself stopped running (the watchdog runs there too). Pair it with something outside, e.g. a weekly local cron of `quiet-pipelines check`.
-- Redaction is best effort. GitHub already masks registered secrets in logs; this is a second layer, not a guarantee.
-- Diagnosis reads only the newest failed run in the window, and only the configured workflows.
+`unknown_cases.py` uses synthetic logs and costs about $0.03-0.06. The real-failure sets above are not in this repository.

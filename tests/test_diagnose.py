@@ -135,6 +135,25 @@ def test_log_read_error_text_is_redacted():
     assert "could not read CI logs" in d.error and SECRET not in d.error
 
 
+def test_upstream_shape_change_rule_is_sent_and_external_change_kept():
+    # Based on a real case (a public data crawler): the upstream API started returning ids as int,
+    # so the crawler's own code raised TypeError. The prompt must tell the model this is
+    # external_change, and an external_change answer must reach the Issue unchanged.
+    log = ('  File "fetch/routes.py", line 48, in get_route_stops\n'
+           '    url = BASE + "/route/" + route_id\n'
+           'TypeError: can only concatenate str (not "int") to str\n')
+    payload = {**GOOD, "category": "external_change", "confidence": "high",
+               "summary": "The upstream API now returns route ids as integers."}
+    client = FakeClient(payload)
+    d = diagnose(CHECK, DiagnoseConfig(), gh=FakeGH(log), client=client)
+
+    system = client.kwargs["system"]
+    rules = system.split("Rules:", 1)[1]
+    rule = next(line for line in rules.split("\n- ") if "shape of upstream data changed" in line)
+    assert "external_change" in rule and "own code" in rule
+    assert d.category == "external_change" and d.confidence == "high"
+
+
 def test_log_read_failure_still_diagnoses():
     class BrokenGH(FakeGH):
         def failed_runs(self, *a):
