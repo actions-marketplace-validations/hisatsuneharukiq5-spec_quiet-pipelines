@@ -53,6 +53,12 @@ quiet-pipelines checks whether the output actually appeared, not whether the job
   - GitHub Actions itself not running, because the watchdog runs there too. Pair it with
     something outside, e.g. a local cron of `quiet-pipelines check`.
 
+## In use
+
+Running on my own pipelines since 2026-11-17: on its first run it opened two Issues (a channel
+with no new video, and a model retiring on 11/30). After I migrated the model, the next run
+closed the ledger Issue by itself.
+
 ## How accurate the diagnosis is
 
 These are measured numbers, not claims.
