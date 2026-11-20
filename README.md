@@ -169,7 +169,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: hisatsuneharukiq5-spec/quiet-pipelines@v0.1.0
+      - uses: hisatsuneharukiq5-spec/quiet-pipelines@v0.1.1
         env:
           YT_TOKEN_JSON: ${{ secrets.YT_TOKEN_JSON }}
         with:

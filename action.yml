@@ -21,6 +21,7 @@ inputs:
     description: "true = fail this step when something is abnormal (in addition to the Issue)"
     default: "false"
   python-version:
+    description: Python version used to run quiet-pipelines
     default: "3.12"
 
 outputs:
@@ -34,7 +35,7 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@v7
       with:
         python-version: ${{ inputs.python-version }}
 

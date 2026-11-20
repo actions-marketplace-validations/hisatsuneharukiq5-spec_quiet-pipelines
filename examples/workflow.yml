@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: hisatsuneharukiq5-spec/quiet-pipelines@v0.1.0          # pin a tag or a commit SHA
+      - uses: hisatsuneharukiq5-spec/quiet-pipelines@v0.1.1          # pin a tag or a commit SHA
         env:
           YT_TOKEN_JSON: ${{ secrets.YT_TOKEN_JSON }}   # only the secrets your checks reference
         with:
